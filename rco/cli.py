@@ -1,54 +1,30 @@
 from __future__ import annotations
+
+import json
 import os
 import sys
 import textwrap
-import warnings
-from typing import Optional
-from statistics import mean
 from datetime import date
-
-import json
-
 from functools import lru_cache
-from typing import List, Any, Dict
-from urllib.parse import urlencode, quote_plus
-from rco.helpers import *
-
-# Suppress urllib3 SSL warning
-warnings.filterwarnings('ignore', category=Warning, module='urllib3')
+from statistics import mean
+from typing import Any, Dict, List, Optional
+from urllib.parse import quote_plus, urlencode
 
 import requests
 import typer
-from rich import print, box
-from rich.table import Table
+import warnings
+from rich import box, print
 from rich.console import Console
+from rich.table import Table
 
-API_ROOT = "https://app.rendacomopcoes.com.br/api"
+from rco.utils.requests import API_ROOT, JSON_API_ROOT, get_cookie, request_json
+from rco.helpers import *
 
 app = typer.Typer(add_help_option=False, no_args_is_help=True)
 console = Console()
 
-def get_cookie() -> str:
-    cookie = os.getenv("COOKIE_JAR")
-    if not cookie:
-        typer.secho(
-            "❌ COOKIE_JAR environment variable is not set.",
-            fg=typer.colors.RED,
-            err=True,
-        )
-        raise typer.Exit(code=1)
-    return cookie
+warnings.filterwarnings("ignore", category=Warning, module="urllib3")
 
-
-def request_json(path: str) -> dict:
-    cookie = get_cookie()
-    headers = {"Accept": "*/*"}
-    resp = requests.get(f"{API_ROOT}/{path.lstrip('/')}", headers=headers, cookies=dict([c.split('=', 1) for c in cookie.split('; ')]))
-    resp.raise_for_status()
-    return resp.json()
-# ──────────────────────────────────────────────────────────────────────────
-# Command: opportunities
-# -------------------------------------------------------------------------
 @app.command(name="opportunities")
 def opportunities_cmd(
     status: str = typer.Option(
@@ -72,7 +48,7 @@ def opportunities_cmd(
     sort: str = typer.Option(
         None,
         "--sort",
-        help="Sort by column (id, ticker, strategy, entry, current, profit, loss, profit_max, expires, status, created, days_open)"
+        help="Sort by column (id, ticker, strategy, entry, current, profit, loss, profit_max, expires, status, created, days_open, option_ticker, option_strike, option_type, option_expires, profit_50, profit_100)"
     ),
     order: str = typer.Option(
         "desc",
@@ -111,40 +87,34 @@ def opportunities_cmd(
     • rco opportunities -t VALE3                           # filter by ticker
     • rco opportunities -f venda_de_put_semanal            # filter by strategy
     """
-    # ------------------------------------------------------------------ request
-    params: dict[str, Any] = {"strategies":["venda_de_put_longa","compra_de_call_longa","venda_de_put_mensal","venda_de_put_semanal"], "status": status, "limit": "99"}
+
+    params: dict[str, Any] = {
+        "strategies": [
+            "venda_de_put_longa",
+            "compra_de_call_longa", 
+            "venda_de_put_mensal",
+            "venda_de_put_semanal"
+        ],
+        "status": status,
+        "limit": "99"
+    }
 
     if strategy:
         params["filters"] = json.dumps({"strategies": strategy})
 
-    url = (
-        "https://app.rendacomopcoes.com.br/opportunities/__data.json?"
-        + urlencode(params, quote_via=quote_plus)
-    )
-
-    resp = requests.get(
-        url,
-        headers={"Accept": "*/*"},
-        cookies=dict(
-            [c.split("=", 1) for c in get_cookie().split("; ")]
-        ),
-        timeout=15,
-    )
-    resp.raise_for_status()
-    data = resp.json()
+    url = JSON_API_ROOT + urlencode(params, quote_via=quote_plus)
+    data = request_json(url)
 
     if raw:
         console.print_json(data=data)
         raise typer.Exit()
 
-    # ------------------------------------------------------------- post‑process
     parsedSvelte = unpack_svelte_payload(data)
     operations = parsedSvelte["operations"]
     if not operations:
         console.print("[bold yellow]No results returned.[/]")
         raise typer.Exit()
 
-    # Apply filters
     if filter_ticker:
         operations = [op for op in operations if op["stock"]["ticker"] == filter_ticker]
     if filter_strategy:
@@ -164,11 +134,15 @@ def opportunities_cmd(
             "current": lambda op: op.get("current_price", 0),
             "profit": lambda op: op.get("estimated_profit", 0),
             "loss": lambda op: op.get("max_loss", 0),
-            "profit_max": lambda op: op.get("max_profit", 0),
             "expires": lambda op: op["expires_at"],
             "status": lambda op: op["status"],
             "created": lambda op: op["created_at"],
-            "days_open": lambda op: (date.today() - date.fromisoformat(op["created_at"].split("T")[0])).days
+            "days_open": lambda op: (date.today() - date.fromisoformat(op["created_at"].split("T")[0])).days,
+            "option_ticker": lambda op: op["operation_legs"][0]["option"]["ticker"],
+            "option_strike": lambda op: op["operation_legs"][0]["option"]["strike"],
+            "option_type": lambda op: op["operation_legs"][0]["option"]["type"],
+            "profit_50": lambda op: (op.get("current_price", 0) * 1.5 - op.get("entry_price", 0)) * 100,
+            "profit_100": lambda op: (op.get("current_price", 0) * 2 - op.get("entry_price", 0)) * 100
         }
         
         if sort not in sort_mapping:
@@ -195,16 +169,29 @@ def opportunities_cmd(
     table.add_column("Current", justify="right")
     table.add_column("Est. Profit", justify="right")
     table.add_column("Max Loss", justify="right")
-    table.add_column("Max Profit", justify="right")
+    table.add_column("50% Profit", justify="right")
+    table.add_column("100% Profit", justify="right")
     table.add_column("Expires", style="green")
     table.add_column("Created", style="blue")
     table.add_column("Days Open", justify="right")
+    table.add_column("Option", style="yellow")
+    table.add_column("Last Price", justify="right")
+    table.add_column("Strike", justify="right")
+    table.add_column("Type", style="cyan")
+    table.add_column("Option Expires", style="green")
     table.add_column("Status", style="yellow")
 
     for op in operations:
         stock = op["stock"]
         created_date = date.fromisoformat(op["created_at"].split("T")[0])
         days_open = (date.today() - created_date).days
+        option = op["operation_legs"][0]["option"]
+        
+        # Calculate potential profits
+        current_price = op.get("current_price", 0)
+        entry_price = op.get("entry_price", 0)
+        profit_50 = (current_price * 1.5 - entry_price) * 100
+        profit_100 = (current_price * 2 - entry_price) * 100
         
         table.add_row(
             str(op["id"]),
@@ -214,10 +201,16 @@ def opportunities_cmd(
             fmt(op.get("current_price"), "{:.3f}"),
             fmt(op.get("estimated_profit")),
             fmt(op.get("max_loss")),
-            fmt(op.get("max_profit")),
+            fmt(profit_50, "{:.2f}"),
+            fmt(profit_100, "{:.2f}"),
             op["expires_at"].split("T")[0],
             op["created_at"].split("T")[0],
             str(days_open),
+            option["ticker"],
+            fmt(get_ticker_price_close_price(stock["ticker"]), "{:.3f}"),
+            f'{option["strike"]:.2f}',
+            option["type"],
+            option["expires_at"].split("T")[0],
             op["status"]
         )
 
@@ -241,7 +234,7 @@ def price(
         rco price VALE3 --avg 5
         rco price VALE3 --avg 10 --quiet
     """
-    data = request_json(f"assets/{ticker}/history")
+    data = request_json(f"{API_ROOT}/assets/{ticker}/history")
     dates = data.get("dates", [])
 
     if not dates:
@@ -251,7 +244,6 @@ def price(
     # Sort newest‑first just in case the API isn't already
     dates.sort(key=lambda d: d["date"], reverse=True)
 
-    # Optional average calculation
     avg_value = None
     if avg:
         if len(dates) < avg:
@@ -277,7 +269,7 @@ def price(
     table.add_column("Date", style="cyan")
     table.add_column("Close", justify="right", style="green")
 
-    for d in dates[:30]:           # limit to 30 rows to keep it readable
+    for d in dates[:30]:           
         table.add_row(d["date"], f"{d['price']:.2f}")
 
     console.print(table)
@@ -285,6 +277,13 @@ def price(
     if avg:
         console.print(f"[bold bright_black]{len(subset)}‑day average "
                       f"{avg_value:.2f}[/]")
+
+
+def get_ticker_price_close_price(ticker: str, field:str = "close") -> dict:
+    params = f"fields={field}"
+    uri = f"{API_ROOT}/assets/{ticker}?{params}"
+
+    return request_json(uri)[field]
 
 
 @app.callback(invoke_without_command=True)
