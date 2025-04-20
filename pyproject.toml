@@ -1,0 +1,13 @@
+[project]
+name = "rco-cli"
+version = "0.1.0"
+description = "CLI for RendacomOpcoes"
+requires-python = ">=3.9"
+dependencies = [
+  "typer[all]",
+  "requests",
+  "python-dotenv"          # optional ‑ see env section
+]
+
+[project.scripts]
+rco = "rco.cli:app"
