@@ -6,7 +6,8 @@ requires-python = ">=3.9"
 dependencies = [
   "typer[all]",
   "requests",
-  "python-dotenv"          # optional ‑ see env section
+  "python-dotenv",
+  "urllib3<2.0"         
 ]
 
 [project.scripts]

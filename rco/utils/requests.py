@@ -8,7 +8,6 @@ import warnings
 API_ROOT = "https://app.rendacomopcoes.com.br/api"
 JSON_API_ROOT = "https://app.rendacomopcoes.com.br/opportunities/__data.json?"
 
-warnings.filterwarnings("ignore", category=Warning, module="urllib3")
 
 def get_cookie() -> str:
     cookie = os.getenv("COOKIE_JAR")
