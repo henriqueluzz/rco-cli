@@ -60,3 +60,7 @@ def real_profit(option: str, strategy: str, entry: float, current: float):
     
     else:
         return -0.0
+
+
+def format_operation_strategy(operation: str):
+    return operation.replace("_", " ")

@@ -77,3 +77,6 @@ def unpack_svelte_payload(payload):
 
 def fmt(val, fmt_str="{:.2f}"):
     return fmt_str.format(val) if val is not None else "—"
+
+def fmt_currency(val, fmt_str="{:.2f}", currency: str = "R$"):
+    return f"{currency} {fmt(val, fmt_str)}"

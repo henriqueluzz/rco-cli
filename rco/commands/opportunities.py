@@ -13,11 +13,10 @@ from rich.table import Table
 from rco.commands.styles import *
 from urllib.parse import urlencode, quote_plus  
 from rco.utils.requests import JSON_API_ROOT, request_json
-from rco.helpers import fmt, unpack_svelte_payload
-from rco.commands.shared import get_ticker_price_close_price, get_ticker_timestamp, elapsed_time_since_update, real_profit
+from rco.helpers import fmt, unpack_svelte_payload, fmt_currency
+from rco.commands.shared import *
 
 console = Console()
-
 
 def opportunities_cmd(               
     status: str = typer.Option(
@@ -76,7 +75,6 @@ def opportunities_cmd(
         raise typer.Exit()
 
     sort_map = {
-        "id": lambda o: o["id"],
         "ticker": lambda o: o["stock"]["ticker"],
         "strategy": lambda o: o["strategy"],
         "entry": lambda o: o.get("entry_price", 0),
@@ -107,9 +105,9 @@ def opportunities_cmd(
         title=f"[bold]Opportunities – {status.upper()} (Total: {len(ops)})[/]",
         box=box.SIMPLE,
     )
-    table.add_column("ID", justify="right")
     table.add_column("Ticker", style="cyan")
     table.add_column("Strategy", style="magenta")
+    table.add_column("Option", style="yellow")
     table.add_column("Entry", justify="right")
     table.add_column("Current", justify="right")
     table.add_column("Real. Profit", justify="right")
@@ -118,7 +116,6 @@ def opportunities_cmd(
     table.add_column("100% Profit", justify="right")
     table.add_column("Created", style="blue")
     table.add_column("Days Open", justify="right")
-    table.add_column("Option", style="yellow")
     table.add_column("Last Price", justify="right")
     table.add_column("Strike", justify="right")
     table.add_column("Type", style="cyan")
@@ -137,25 +134,22 @@ def opportunities_cmd(
         ent = op.get("entry_price", 0)
         profit_50 = (cur * 1.5 - ent) * 100
         profit_100 = (cur * 2 - ent) * 100
-        #est_profit = fmt(op.get("estimated_profit"))
         strategy = op["strategy"]
-        profit = real_profit(option, strategy, float(ent), float(cur))
+        profit = real_profit(option["type"], strategy, float(ent), float(cur))
 
         table.add_row(
-            str(op["id"]),
             stock["ticker"],
-            strategy,
-            fmt(ent, "{:.3f}"),
-            fmt(cur, "{:.3f}"),
+            format_operation_strategy(strategy),
+            option["ticker"],
+            fmt_currency(ent, "{:.2f}"),
+            fmt_currency(cur, "{:.2f}"),
             f"[{style_est_profit(option['type'], strategy, cur, ent)}]{profit}[/]",
-            #fmt(op.get("estimated_profit")),
             fmt(op.get("max_loss")),
             fmt(profit_50, "{:.2f}"),
             fmt(profit_100, "{:.2f}"),
             op["created_at"].split("T")[0],
             f"[{style_days_open(days_open, 50)}]{days_open}[/]",
-            option["ticker"],
-            fmt(get_ticker_price_close_price(stock["ticker"]), "{:.3f}"),
+            fmt_currency(get_ticker_price_close_price(stock["ticker"]), "{:.2f}"),
             f'{option["strike"]:.2f}',
             option["type"],
             option["expires_at"].split("T")[0],
