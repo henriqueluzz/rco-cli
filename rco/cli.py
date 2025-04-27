@@ -3,7 +3,7 @@ from __future__ import annotations
 import typer
 from typing import Optional
 
-from rco.commands.opportunities import opportunities_cmd
+from rco.commands.opportunities import opportunities
 from rco.commands.price import price_cmd 
 
 app = typer.Typer(
@@ -12,7 +12,7 @@ app = typer.Typer(
     help="RendacomOpcoes CLI.  Use `rco <command> --help` for details.",
 )
 
-app.command(name="opportunities")(opportunities_cmd)
+app.command(name="opportunities")(opportunities)
 app.command(name="price")(price_cmd) 
 
 # top‑level help / default behaviour

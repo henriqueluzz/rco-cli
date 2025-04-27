@@ -1,160 +1,226 @@
 from __future__ import annotations
-
 import json
+from dataclasses import dataclass
 from datetime import date
-from statistics import mean
-from typing import Any, List, Optional
+from functools import lru_cache
+from typing import Any, List, Literal, Optional
 
 import typer
-from rich import box
 from rich.console import Console
-from rich.table import Table
+from rich.table import Column, Table
+from rich.box import SIMPLE
+from urllib.parse import quote_plus, urlencode
 
-from rco.commands.styles import *
-from urllib.parse import urlencode, quote_plus  
 from rco.utils.requests import JSON_API_ROOT, request_json
-from rco.helpers import fmt, unpack_svelte_payload, fmt_currency
-from rco.commands.shared import *
+from rco.helpers import fmt, fmt_currency, unpack_svelte_payload
+from rco.commands.styles import (
+    format_operation_strategy,
+    style_days_open,
+    style_est_profit,
+)
+from rco.commands.shared import (
+    real_profit,
+    get_ticker_price_close_price,
+    get_ticker_timestamp,
+    elapsed_time_since_update
+)
+
+from rco.commands.opportunitiesEnums import *
+
+
+app = typer.Typer(help="List option opportunities with filters")
+
+StatusType = Literal["open", "closed", "exercised"]
+OrderType = Literal["asc", "desc"]
+SortOptions = Literal[
+    "ticker", "strategy", "entry", "current", "profit", "loss",
+    "expires", "status", "created", "days_open", "option_ticker",
+    "option_strike", "option_type", "profit_50", "profit_100"
+]
+
+DEFAULT_STRATEGIES = [
+    "venda_de_put_longa",
+    "compra_de_call_longa",
+    "venda_de_put_mensal",
+    "venda_de_put_semanal",
+]
 
 console = Console()
 
-def opportunities_cmd(               
-    status: str = typer.Option(
-        "open", "--status", "-s",
-        help="Operation status (open, closed, exercised)"
+@dataclass
+class Operation:
+    raw: dict[str, Any]
+
+    @property
+    def ticker(self) -> str:
+        return self.raw["stock"]["ticker"]
+
+    @property
+    def entry(self) -> float:
+        return float(self.raw.get("entry_price", 0))
+
+    @property
+    def current(self) -> float:
+        return float(self.raw.get("current_price", 0))
+
+    @property
+    def created_at(self) -> date:
+        return date.fromisoformat(self.raw["created_at"][:10])
+
+    @property
+    def days_open(self) -> int:
+        return (date.today() - self.created_at).days
+
+    @property
+    def option(self) -> dict[str, Any]:
+        return self.raw["operation_legs"][0]["option"]
+
+    @property
+    def profit_50(self) -> float:
+        return (self.current * 1.5 - self.entry) * 100
+
+    @property
+    def profit_100(self) -> float:
+        return (self.current * 2.0 - self.entry) * 100
+
+    @property
+    def profit(self) -> float:
+        return real_profit(
+            self.option["type"], self.raw["strategy"], self.entry, self.current
+        )
+
+    def to_row(self, last_price: float, last_update: str) -> list[str]:
+        return [
+            self.ticker,
+            format_operation_strategy(self.raw["strategy"]),
+            self.option["ticker"],
+            fmt_currency(self.entry),
+            fmt_currency(self.current),
+            f"[{style_est_profit(self.option['type'], self.raw['strategy'], self.current, self.entry)}]{self.profit}[/]",
+            fmt(self.raw.get("max_loss")),
+            fmt(self.profit_50, "{:.2f}"),
+            fmt(self.profit_100, "{:.2f}"),
+            self.created_at.isoformat(),
+            f"[{style_days_open(self.days_open, 50)}]{self.days_open}[/]",
+            fmt_currency(last_price),
+            f"{self.option['strike']:.2f}",
+            self.option["type"],
+            self.raw["expires_at"][:10],
+            self.raw["status"],
+            last_update,
+        ]
+
+
+@app.command()
+def opportunities(
+    status: Status = typer.Option(
+        Status.open,
+        "--status", "-s",
+        help="Operation status",
     ),
-    strategy: List[str] = typer.Option(
-        None, "--strategy", "-g", help="Filter by strategy (repeatable)"
+    strategy: Optional[List[str]] = typer.Option(
+        None, "--strategy", "-g",
+        help="Filter by strategy (repeatable)"
     ),
     limit: int = typer.Option(
         99, "--limit", "-l",
-        help="Max rows to fetch from the API (<= 99)"
+        max=99,
+        help="Max rows to fetch",
     ),
-    sort: str = typer.Option(
+    sort_by: Optional[SortBy] = typer.Option(
         None, "--sort",
-        help=("Sort by column (id, ticker, strategy, entry, current, profit, "
-              "loss, profit_max, expires, status, created, days_open, "
-              "option_ticker, option_strike, option_type, option_expires, "
-              "profit_50, profit_100)")
+        help="Sort by column",
     ),
-    order: str = typer.Option("desc", "--order", "-o",
-                              help="Sort order (asc, desc)"),
-    ticker: str = typer.Option(
-        None, "--ticker", "-t", help="Filter by ticker (e.g., VALE3)"
+    order: Order = typer.Option(
+        Order.desc, "--order", "-o",
+        help="Sort order",
     ),
-    raw: bool = typer.Option(False, "--raw", help="Dump raw JSON"),
-) -> None:
+    ticker: Optional[str] = typer.Option(
+        None, "--ticker", "-t",
+        help="Filter by ticker (e.g., VALE3)"
+    ),
+    raw: bool = typer.Option(
+        False, "--raw",
+        help="Dump raw JSON",
+    ),
+):
     """
-    List option **opportunities** with optional filters.
+    List option opportunities with optional filters.
     """
-    params: dict[str, Any] = {
-        "strategies": [
-            "venda_de_put_longa",
-            "compra_de_call_longa",
-            "venda_de_put_mensal",
-            "venda_de_put_semanal",
-        ],
-        "status": status,
-        "limit": str(limit),
-    }
-    if strategy:
-        params["filters"] = json.dumps({"strategies": strategy})
-
-    url = JSON_API_ROOT + urlencode(params, quote_via=quote_plus)
-    data = request_json(url)
-    if raw:
-        console.print_json(data=data)
-        raise typer.Exit()
-
-    ops = unpack_svelte_payload(data)["operations"]
-    if ticker:
-        ops = [o for o in ops if o["stock"]["ticker"] == ticker]
+    ops = fetch_operations(status, strategy or DEFAULT_STRATEGIES, limit)
 
     if not ops:
         console.print("[yellow]No results after filters.[/]")
         raise typer.Exit()
 
-    sort_map = {
-        "ticker": lambda o: o["stock"]["ticker"],
-        "strategy": lambda o: o["strategy"],
-        "entry": lambda o: o.get("entry_price", 0),
-        "current": lambda o: o.get("current_price", 0),
-        "profit": lambda o: o.get("estimated_profit", 0),
-        "loss": lambda o: o.get("max_loss", 0),
-        "expires": lambda o: o["expires_at"],
-        "status": lambda o: o["status"],
-        "created": lambda o: o["created_at"],
-        "days_open": lambda o: (
-            date.today() - date.fromisoformat(o["created_at"].split("T")[0])
-        ).days,
-        "option_ticker": lambda o: o["operation_legs"][0]["option"]["ticker"],
-        "option_strike": lambda o: o["operation_legs"][0]["option"]["strike"],
-        "option_type": lambda o: o["operation_legs"][0]["option"]["type"],
-        "profit_50": lambda o: (o.get("current_price", 0) * 1.5
-                                - o.get("entry_price", 0)) * 100,
-        "profit_100": lambda o: (o.get("current_price", 0) * 2
-                                 - o.get("entry_price", 0)) * 100,
-    }
-    if sort:
-        if sort not in sort_map:
-            console.print(f"[red]Invalid sort column:[/] {sort}")
-            raise typer.Exit(1)
-        ops.sort(key=sort_map[sort], reverse=(order == "desc"))
+    if ticker:
+        ops = [op for op in ops if op.ticker == ticker]
 
-    table = Table(
-        title=f"[bold]Opportunities – {status.upper()} (Total: {len(ops)})[/]",
-        box=box.SIMPLE,
-    )
-    table.add_column("Ticker", style="cyan")
-    table.add_column("Strategy", style="magenta")
-    table.add_column("Option", style="yellow")
-    table.add_column("Entry", justify="right")
-    table.add_column("Current", justify="right")
-    table.add_column("Real. Profit", justify="right")
-    table.add_column("Max Loss", justify="right")
-    table.add_column("50% Profit", justify="right")
-    table.add_column("100% Profit", justify="right")
-    table.add_column("Created", style="blue")
-    table.add_column("Days Open", justify="right")
-    table.add_column("Last Price", justify="right")
-    table.add_column("Strike", justify="right")
-    table.add_column("Type", style="cyan")
-    table.add_column("Option Expires", style="green")
-    table.add_column("Status", style="yellow")
-    table.add_column("Last Update", style="blue")
-
-
-    for op in ops:
-        stock = op["stock"]
-        created = date.fromisoformat(op["created_at"].split("T")[0])
-        days_open = (date.today() - created).days
-        last_update = elapsed_time_since_update(get_ticker_timestamp(stock["ticker"]))
-        option = op["operation_legs"][0]["option"]
-        cur = op.get("current_price", 0)
-        ent = op.get("entry_price", 0)
-        profit_50 = (cur * 1.5 - ent) * 100
-        profit_100 = (cur * 2 - ent) * 100
-        strategy = op["strategy"]
-        profit = real_profit(option["type"], strategy, float(ent), float(cur))
-
-        table.add_row(
-            stock["ticker"],
-            format_operation_strategy(strategy),
-            option["ticker"],
-            fmt_currency(ent, "{:.2f}"),
-            fmt_currency(cur, "{:.2f}"),
-            f"[{style_est_profit(option['type'], strategy, cur, ent)}]{profit}[/]",
-            fmt(op.get("max_loss")),
-            fmt(profit_50, "{:.2f}"),
-            fmt(profit_100, "{:.2f}"),
-            op["created_at"].split("T")[0],
-            f"[{style_days_open(days_open, 50)}]{days_open}[/]",
-            fmt_currency(get_ticker_price_close_price(stock["ticker"]), "{:.2f}"),
-            f'{option["strike"]:.2f}',
-            option["type"],
-            option["expires_at"].split("T")[0],
-            op["status"],
-            last_update
-        )
-
+    ops = sort_operations(ops, sort_by, order)
+    table = build_table(status, ops)
     console.print(table)
+
+
+def fetch_operations(status: str, strategies: List[str], limit: int) -> list[Operation]:
+    params = {"status": status, "limit": str(limit), "strategies": strategies}
+    url = JSON_API_ROOT + urlencode(params, quote_via=quote_plus)
+    payload = request_json(url)
+    ops_raw = unpack_svelte_payload(payload)["operations"]
+    return [Operation(op) for op in ops_raw]
+
+
+def sort_operations(
+    operations: list[Operation],
+    sort_by: Optional[SortOptions],
+    order: OrderType
+) -> list[Operation]:
+    if not sort_by:
+        return operations
+    reverse = (order.lower() == "desc")
+    return sorted(operations, key=lambda op: getattr(op, sort_by), reverse=reverse)
+
+@lru_cache(maxsize=None)
+def get_last_price(ticker: str) -> float:
+    return get_ticker_price_close_price(ticker)
+
+@lru_cache(maxsize=None)
+def get_last_update(ticker: str) -> str:
+    ts = get_ticker_timestamp(ticker)
+    return elapsed_time_since_update(ts)
+
+
+def build_table(status: str, operations: list[Operation]) -> Table:
+    table = Table(
+        title=f"[bold]Opportunities – {status.upper()} (Total: {len(operations)})[/]",
+        box=SIMPLE,
+    )
+    columns = [
+        ("Ticker", "cyan"),
+        ("Strategy", "magenta"),
+        ("Option", "yellow"),
+        ("Entry", None, "right"),
+        ("Current", None, "right"),
+        ("Real. Profit", None, "right"),
+        ("Max Loss", None, "right"),
+        ("50% Profit", None, "right"),
+        ("100% Profit", None, "right"),
+        ("Created", "blue"),
+        ("Days Open", None, "right"),
+        ("Last Price", None, "right"),
+        ("Strike", None, "right"),
+        ("Type", "cyan"),
+        ("Option Expires", "green"),
+        ("Status", "yellow"),
+        ("Last Update", "blue"),
+    ]
+    for header, style, *justify in (
+        (col + (None,) * (3 - len(col))) for col in columns
+    ):
+        table.add_column(header, style=style, justify=justify[0] if justify else None)
+
+    for op in operations:
+        last_price = get_last_price(op.ticker)
+        last_update = get_last_update(op.ticker)
+        table.add_row(*op.to_row(last_price, last_update))
+
+    return table

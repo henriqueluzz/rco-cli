@@ -12,3 +12,6 @@ def style_est_profit(option_type: str, strategy: str, current: float, entry: flo
         return "green" if current > entry else "red"
 
     return "default"
+
+def format_operation_strategy(operation: str):
+    return operation.replace("_", " ")
